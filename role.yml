@@ -1,0 +1,14 @@
+DestinationPolicy: !Sub |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": []
+              },
+              "Action": "logs:PutSubscriptionFilter",
+              "Resource": "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:destination:cwldestinationsplunk"
+            }
+          ]
+        }
