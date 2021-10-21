@@ -1,0 +1,357 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  Template for AWS CloudWatch Logs data ingest into Splunk using AWS Kinesis Firehose and AWS
+  Lambda.
+Parameters:
+  SplunkEndPoint:
+    Description: Splunk cluster endpoint
+    Default: https://customer.splunk.endpoint
+    Type: String
+  SplunkHECToken:
+    NoEcho: 'true'
+    Description: Splunk HEC authentication token
+    Type: String
+  LambdaSourceBucket:
+    Description: S3 Bucket for Transformation Lambda download
+    Default: bucket-with-lambda-code
+    Type: String
+  LambdaSourceKey:
+    Description: S3 Bucket for Transformation Lambda download
+    Default: lambda-src-file.zip
+    Type: String
+  CloudWatchLogGroupName:
+    Description: Name of the CloudWatch Log group you want to push the logs from to Kinesis Firehose
+    Default: log-group-name
+    Type: String
+
+Resources:
+  LogTransformFunctionLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Join 
+        - ''
+        - - /aws/lambda/
+          - aws-logging-cwl-tf-lambda
+      RetentionInDays: 365
+  LogsTransformFunctionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      Path: /
+      Policies:
+        - PolicyName: !Join 
+            - ''
+            - - aws-logging-cwl-tf-lambda
+              - '-'
+              - !Ref 'AWS::Region'
+              - '-Policy'
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: !GetAtt 
+                  - LogTransformFunctionLogGroup
+                  - Arn
+              - Effect: Allow
+                Action:
+                  - "firehose:PutRecordBatch"
+                Resource: !Join
+                  - ""
+                  - - "arn:aws:firehose:"
+                    - !Ref "AWS::Region"
+                    - ":"
+                    - !Ref "AWS::AccountId"
+                    - ":deliverystream/cwl-firehose-splunk-stream"
+                    - !Ref "AWS::Region"                  
+                  
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+      RoleName: !Join 
+        - ''
+        - - aws-logging-cwl-tf-lambda
+          - '-'
+          - !Ref 'AWS::Region'
+          - '-Role'
+  logsTransformFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code:
+        S3Bucket: !Ref LambdaSourceBucket 
+        S3Key: !Ref LambdaSourceKey
+      Description: >-
+        Stream events from CloudWatch Events to Splunk using HTTP event
+        collector
+      FunctionName: aws-logging-cwl-tf-lambda
+      MemorySize: 512
+      Handler: !Join 
+        - ''
+        - - aws-logging-cwl-tf-lambda
+          - .handler
+      Role: !GetAtt 
+        - LogsTransformFunctionRole
+        - Arn
+      Timeout: 300
+      Runtime: python3.8
+  FirehoseStreamLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Join 
+        - ''
+        - - /aws/kinesisfirehose/cwl-firehose-splunk-stream-
+          - !Ref 'AWS::Region'
+      RetentionInDays: 365
+  LogFirehoseSplunkStream:
+    Type: 'AWS::Logs::LogStream'
+    Properties:
+      LogGroupName: !Ref FirehoseStreamLogGroup
+      LogStreamName: SplunkDelivery
+  LogFirehoseS3Stream:
+    Type: 'AWS::Logs::LogStream'
+    Properties:
+      LogGroupName: !Ref FirehoseStreamLogGroup
+      LogStreamName: S3Delivery
+  FirehoseSplunkStream:
+    Type: 'AWS::KinesisFirehose::DeliveryStream'
+    Properties:
+      SplunkDestinationConfiguration:
+        S3Configuration:
+          CompressionFormat: GZIP
+          BucketARN: !GetAtt 
+            - firehosesplunkbackup
+            - Arn
+          RoleARN: !GetAtt 
+            - FirehoseSplunkStreamrole
+            - Arn
+          BufferingHints:
+            IntervalInSeconds: 300
+            SizeInMBs: 1
+        HECEndpointType: Raw
+        HECToken: !Ref SplunkHECToken
+        HECAcknowledgmentTimeoutInSeconds: 180
+        RetryOptions:
+          DurationInSeconds: 300
+        HECEndpoint: !Ref SplunkEndPoint
+        S3BackupMode: FailedEventsOnly
+        CloudWatchLoggingOptions:
+          Enabled: 'true'
+          LogGroupName: !Ref FirehoseStreamLogGroup
+          LogStreamName: !Ref LogFirehoseSplunkStream
+        ProcessingConfiguration:
+          Enabled: true
+          Processors:
+            - Parameters:
+                - ParameterName: LambdaArn
+                  ParameterValue: !GetAtt 
+                    - logsTransformFunction
+                    - Arn
+                - ParameterName: RoleArn
+                  ParameterValue: !GetAtt 
+                    - FirehoseSplunkStreamrole
+                    - Arn
+              Type: Lambda
+      DeliveryStreamName: !Join 
+        - '' 
+        - - cwl-firehose-splunk-stream-
+          - !Ref 'AWS::Region'
+      DeliveryStreamType: DirectPut
+  firehosesplunkbackup:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: 'true'
+        BlockPublicPolicy: 'true'
+        IgnorePublicAcls: 'true'
+        RestrictPublicBuckets: 'true'
+      BucketName: !Join 
+        - ''
+        - - cwl-firehose-splunk-backup-
+          - !Ref 'AWS::Region'
+          - '-'
+          - !Ref 'AWS::AccountId'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+  firehosesplunkbackupbucketpolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      PolicyDocument:
+        Id: firehosesplunkbackupbucketpolicy
+        Version: 2012-10-17
+        Statement:
+          - Sid: AllowSSLRequestsOnly
+            Action: 's3:*'
+            Effect: Deny
+            Resource:
+              - !GetAtt 
+                - firehosesplunkbackup
+                - Arn
+              - !Join 
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref firehosesplunkbackup
+                  - /*
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+            Principal: '*'
+      Bucket: !Ref firehosesplunkbackup
+  FirehoseSplunkStreamrole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      Path: /
+      Policies:
+        - PolicyName: !Join 
+            - ''
+            - - cwl-firehose-splunk-stream-
+              - !Ref 'AWS::Region'
+              - '-Policy'
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: ''
+                Effect: Allow
+                Action:
+                  - 's3:AbortMultipartUpload'
+                  - 's3:GetBucketLocation'
+                  - 's3:GetObject'
+                  - 's3:ListBucket'
+                  - 's3:ListBucketMultipartUploads'
+                  - 's3:PutObject'
+                Resource:
+                  - !GetAtt 
+                    - firehosesplunkbackup
+                    - Arn
+                  - !Join 
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - !Ref firehosesplunkbackup
+                      - /*
+              - Sid: ''
+                Effect: Allow
+                Action:
+                  - 'lambda:InvokeFunction'
+                  - 'lambda:GetFunctionConfiguration'
+                Resource:
+                  - !GetAtt 
+                    - logsTransformFunction
+                    - Arn
+                  - !Join 
+                    - ''
+                    - - !GetAtt 
+                        - logsTransformFunction
+                        - Arn
+                      - ':*'
+              - Sid: ''
+                Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: !GetAtt 
+                  - FirehoseStreamLogGroup
+                  - Arn
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Sid: ''
+            Effect: Allow
+            Principal:
+              Service: firehose.amazonaws.com
+      RoleName: !Join 
+        - ''
+        - - cwl-firehose-splunk-stream-
+          - !Ref 'AWS::Region'
+          - '-Role'
+  cwlSubscriptionFirehoseRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Sid: ''
+            Effect: Allow
+            Principal:
+              Service: !Join 
+                - ''
+                - - logs.
+                  - !Ref 'AWS::Region'
+                  - .amazonaws.com
+      RoleName: !Join 
+        - ''
+        - - cwlSubscriptionFirehoseRole-
+          - !Ref 'AWS::Region'
+  cwlSubscriptionFirehosePolicy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyName: cwlSubscriptionFirehosePolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - 'firehose:PutRecord'
+              - 'firehose:PutRecordBatch'
+            Resource:
+              - !GetAtt 
+                - FirehoseSplunkStream
+                - Arn
+            Effect: Allow
+      Roles:
+        - !Ref cwlSubscriptionFirehoseRole
+  cwlDestinationFirehose:
+    Type: 'AWS::Logs::Destination'
+    DependsOn:
+      - FirehoseSplunkStream
+      - cwlSubscriptionFirehoseRole
+      - cwlSubscriptionFirehosePolicy
+    Properties:
+      DestinationName: cwldestinationsplunk
+      RoleArn: !GetAtt 
+        - cwlSubscriptionFirehoseRole
+        - Arn
+      TargetArn: !GetAtt 
+        - FirehoseSplunkStream
+        - Arn
+      DestinationPolicy: !Sub |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": []
+              },
+              "Action": "logs:PutSubscriptionFilter",
+              "Resource": "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:destination:cwldestinationsplunk"
+            }
+          ]
+        }
+  CWLSubscriptionFilter:
+    Type: 'AWS::Logs::SubscriptionFilter'
+    DependsOn:
+      - FirehoseSplunkStream
+      - cwlSubscriptionFirehoseRole
+      - cwlSubscriptionFirehosePolicy
+    Properties:
+      RoleArn: !GetAtt 
+        - cwlSubscriptionFirehoseRole
+        - Arn
+      LogGroupName: !Ref CloudWatchLogGroupName
+      FilterPattern: ''
+      DestinationArn: !GetAtt 
+        - FirehoseSplunkStream
+        - Arn
