@@ -1,11 +1,4 @@
-## My Project
-
-TODO: Fill this README out!
-
-Be sure to:
-
-* Change the title in this README
-* Edit your repository description on GitHub
+## Sending-cloudwatch-logs-to-splunk-using-amazon-kinesis-data-firehose
 
 ## Security
 
